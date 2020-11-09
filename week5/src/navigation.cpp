@@ -1,0 +1,599 @@
+#include <CanvasTriangle.h>
+#include <DrawingWindow.h>
+#include <Utils.h>
+#include <fstream>
+#include <vector>
+#include <CanvasPoint.h>
+#include <Colour.h>
+#include <TextureMap.h>
+#include <ModelTriangle.h>
+#include <Utils.h>
+#include <glm/glm.hpp> 
+#include <glm/gtx/string_cast.hpp>
+#include <unordered_map>
+
+#define WIDTH 400
+#define HEIGHT 400
+#define PI atan(1)*4
+
+glm::vec3 camera(0.0, 0.0, 4.0);
+float focal_length = 300;
+glm::mat3 camera_orientation(
+	glm::vec3(1.0, 0.0, 0.0),
+	glm::vec3(0.0, 1.0, 0.0),
+	glm::vec3(0.0, 0.0, 1.0)
+);
+
+void draw_line(CanvasPoint from_point, CanvasPoint to_point, Colour line_colour, DrawingWindow &window) {
+	float x_diff = to_point.x - from_point.x;
+	float y_diff = to_point.y - from_point.y;
+	float number_of_steps = std::max(abs(x_diff), abs(y_diff));
+	float x_step_size = x_diff/number_of_steps;
+	float y_step_size = y_diff/number_of_steps;
+	uint32_t colour = (255 << 24) + (int(line_colour.red) << 16) + (int(line_colour.green) << 8) + int(line_colour.blue);
+	for (float i=0; i<number_of_steps; i++) {
+		float x = from_point.x + (x_step_size * i);
+		float y = from_point.y + (y_step_size * i);
+		window.setPixelColour(round(x), round(y), colour);
+	}
+}
+
+void draw_unfilled_triangle(CanvasTriangle triangle, Colour colour, DrawingWindow &window) {
+	draw_line(triangle.v0(), triangle.v1(), colour, window);
+	draw_line(triangle.v1(), triangle.v2(), colour, window);
+	draw_line(triangle.v2(), triangle.v0(), colour, window);
+}
+
+void fill_triangle(CanvasTriangle triangle, Colour colour, DrawingWindow &window) {
+	CanvasPoint top = triangle.v0();
+	CanvasPoint mid = triangle.v1();
+	CanvasPoint bot = triangle.v2();
+
+	float x1_diff = mid.x - top.x;
+	float y1_diff = mid.y - top.y;
+	float x2_diff = bot.x - top.x;
+	float y2_diff = bot.y - top.y;
+
+	float steps1 = std::max(abs(x1_diff),abs(y1_diff));
+	float steps2 = std::max(abs(x2_diff),abs(y2_diff));
+
+	float x1_step = x1_diff/steps1;
+	float x2_step = x2_diff/steps2;
+	float y1_step = y1_diff/steps1;
+	float y2_step = y2_diff/steps2;
+
+	for(float i = 0.0; i < steps1; i++) {
+		for(float j = 0.0; j < steps2; j++) {
+			float x1 = top.x + (x1_step * i);
+			float y1 = top.y + (y1_step * i);
+			float x2 = top.x + (x2_step * j);
+			float y2 = top.y + (y2_step * j);
+			draw_line(CanvasPoint(round(x1),round(y1)),CanvasPoint(round(x2),round(y2)), colour, window);
+		}
+	}
+}
+
+float find_mid_x_value(CanvasPoint mid_point, CanvasPoint from_point, CanvasPoint to_point) {
+	float x = from_point.x + ((mid_point.y - from_point.y) / (to_point.y - from_point.y) * (to_point.x - from_point.x));
+	return x;
+}
+
+float find_mid_depth_value(CanvasPoint mid_point, CanvasPoint from_point, CanvasPoint to_point) {
+	float depth = from_point.depth + ((mid_point.y - from_point.y) / (to_point.y - from_point.y) * (to_point.depth - from_point.depth));
+	return depth;
+}
+
+CanvasTriangle sort_vertices(CanvasTriangle triangle) {
+	if(triangle.v1().y < triangle.v0().y) {
+		std::swap(triangle.v0(), triangle.v1());
+	}
+	if(triangle.v2().y < triangle.v1().y) {
+		std::swap(triangle.v1(), triangle.v2());
+		if(triangle.v1().y < triangle.v0().y) {
+			std::swap(triangle.v0(), triangle.v1());
+		}
+	}
+	return triangle;
+}
+
+void draw_filled_triangle(CanvasTriangle triangle, Colour triangle_colour, DrawingWindow &window) {
+	triangle = sort_vertices(triangle);
+
+	fill_triangle(triangle, triangle_colour, window);
+}
+
+std::vector<CanvasPoint> interpolate_points(CanvasPoint start, CanvasPoint end, int steps) {
+	std::vector<CanvasPoint> result;
+
+	float x_step = (end.x - start.x)/(steps);
+	float y_step = (end.y - start.y)/(steps);
+	float depth_step = (-1/end.depth - -1/start.depth)/(steps);
+
+	for (int i = 0; i < steps+1; i++) {
+		CanvasPoint temp = CanvasPoint(start.x + (x_step * i), start.y + (y_step * i), -1/start.depth + (depth_step * i));
+		result.push_back(temp);
+	}
+
+	return result;
+}
+
+std::vector<TexturePoint> interpolate_points(TexturePoint start, TexturePoint end, int steps) {
+	std::vector<TexturePoint> result;
+	
+	for (size_t i = 0; i < steps + 1; i++) {
+		TexturePoint p;
+		if (steps == 1) steps = 2;
+		p.x = start.x + ((end.x - start.x) * i / (steps));
+		p.y = start.y + ((end.y - start.y) * i / (steps));
+		result.push_back(p);
+	}
+
+	return result;
+}
+
+void fill_texture_top(CanvasTriangle triangle, TextureMap texture, std::vector<std::vector<float>> &depths, DrawingWindow &window) {
+	CanvasPoint top = triangle.v0();
+	CanvasPoint mid = triangle.v1();
+	CanvasPoint bot = triangle.v2();
+
+	std::vector<CanvasPoint> left = interpolate_points(top, mid, mid.y-top.y+1);
+	std::vector<TexturePoint> left_texture = interpolate_points(top.texturePoint, mid.texturePoint, mid.y-top.y+1);
+
+	std::vector<CanvasPoint> right = interpolate_points(top, bot, mid.y-top.y+1);
+	std::vector<TexturePoint> right_texture = interpolate_points(top.texturePoint, bot.texturePoint, mid.y-top.y+1);
+
+	for (float i = 0.0; i < left.size(); i++) {
+		int steps = abs(left[i].x - right[i].x);
+				
+		std::vector<CanvasPoint> points = interpolate_points(left[i], right[i], steps+1);
+		std::vector<TexturePoint> texturePoints = interpolate_points(left_texture[i], right_texture[i], steps+1);
+
+		for (int c = 0; c < points.size(); c++) {
+			int rounded_x_texture = round(texturePoints.at(c).x);
+			int rounded_y_texture = round(texturePoints.at(c).y);
+			int rounded_x = round(points[c].x);
+			int rounded_y = round(points[c].y);
+			if(rounded_x >= 0 && rounded_x < window.width && rounded_y >= 0 && rounded_y < window.height) {
+				if(-1/points[c].depth > depths[rounded_x][rounded_y]) {
+					depths[rounded_x][rounded_y] = -1/points[c].depth;
+					uint32_t colour = texture.pixels.at((rounded_y_texture*texture.width) + rounded_x_texture);
+					window.setPixelColour(rounded_x, rounded_y, colour);
+				}	
+			}
+		}
+
+	}
+}
+
+void fill_texture_bottom(CanvasTriangle triangle, TextureMap texture, std::vector<std::vector<float>> &depths, DrawingWindow &window) {
+	CanvasPoint mid = triangle.v0();
+	CanvasPoint split = triangle.v1();
+	CanvasPoint bot = triangle.v2();
+
+	std::vector<CanvasPoint> left = interpolate_points(bot, mid, bot.y-mid.y+1);
+	std::vector<TexturePoint> left_texture = interpolate_points(bot.texturePoint, mid.texturePoint, bot.y-mid.y+1);
+
+	std::vector<CanvasPoint> right = interpolate_points(bot, split, bot.y-mid.y+1);
+	std::vector<TexturePoint> right_texture = interpolate_points(bot.texturePoint, split.texturePoint, bot.y-mid.y+1);
+
+	for (float i = 0.0; i < left.size(); i++) {
+		int steps = abs(left[i].x - right[i].x);
+				
+		std::vector<CanvasPoint> points = interpolate_points(left[i], right[i], steps+1);
+		std::vector<TexturePoint> texturePoints = interpolate_points(left_texture[i], right_texture[i], steps+1);
+
+		for (int c = 0; c < points.size(); c++) {
+			int rounded_x_texture = round(texturePoints.at(c).x);
+			int rounded_y_texture = round(texturePoints.at(c).y);
+			int rounded_x = round(points[c].x);
+			int rounded_y = round(points[c].y);
+			if(rounded_x >= 0 && rounded_x < window.width && rounded_y >= 0 && rounded_y < window.height) {
+				if(-1/points[c].depth > depths[rounded_x][rounded_y]) {
+					depths[rounded_x][rounded_y] = -1/points[c].depth;
+					uint32_t colour = texture.pixels.at((rounded_y_texture*texture.width) + rounded_x_texture);
+					window.setPixelColour(rounded_x, rounded_y, colour);
+				}	
+			}
+		}
+
+	}
+}
+
+void map_texture(CanvasTriangle triangle, TextureMap texture, std::vector<std::vector<float>> &depths, DrawingWindow &window) {
+	triangle = sort_vertices(triangle);
+
+	CanvasPoint top = triangle.v0();
+	CanvasPoint mid = triangle.v1();
+	CanvasPoint bot = triangle.v2();
+
+	CanvasPoint split;
+	split.y = mid.y;
+
+	split.x = round(find_mid_x_value(mid, top, bot));
+	split.depth = find_mid_depth_value(mid, top, bot);
+
+	float scale = (mid.y - top.y)/(bot.y-top.y);
+
+	split.texturePoint.x = top.texturePoint.x + scale * (bot.texturePoint.x - top.texturePoint.x);
+	split.texturePoint.y = top.texturePoint.y + scale * (bot.texturePoint.y - top.texturePoint.y);
+
+	CanvasTriangle top_triangle = CanvasTriangle(top, mid, split);
+	fill_texture_top(top_triangle, texture, depths, window);
+
+	CanvasTriangle bottom_triangle = CanvasTriangle(mid, split, bot);
+	fill_texture_bottom(bottom_triangle, texture, depths, window);
+}
+
+void fill_cornell_top(CanvasTriangle triangle, Colour colour, std::vector<std::vector<float>> &depths, DrawingWindow &window) {
+	CanvasPoint top = triangle.v0();
+	CanvasPoint mid = triangle.v1();
+	CanvasPoint split = triangle.v2();
+
+	std::vector<CanvasPoint> left = interpolate_points(top, mid, mid.y-top.y+1);
+	std::vector<CanvasPoint> right = interpolate_points(top, split, mid.y-top.y+1);
+
+	for (float i = 0.0; i < left.size(); i++) {
+		int steps = abs(left[i].x - right[i].x);
+		std::vector<CanvasPoint> points = interpolate_points(left[i], right[i], steps+1);
+		for (int c = 0; c < points.size(); c++) {
+			int rounded_x = round(points[c].x);
+			int rounded_y = round(points[c].y);
+			if(rounded_x >= 0 && rounded_x < window.width && rounded_y >= 0 && rounded_y < window.height) {
+				if(-1/points[c].depth > depths[rounded_x][rounded_y]) {
+					depths[rounded_x][rounded_y] = -1/points[c].depth;
+					uint32_t tri_colour = (255 << 24) + (colour.red << 16) + (colour.green << 8) + colour.blue;
+					window.setPixelColour(rounded_x, rounded_y, tri_colour);
+				}	
+			}
+		}
+
+	}
+}
+
+void fill_cornell_bottom(CanvasTriangle triangle, Colour colour, std::vector<std::vector<float>> &depths, DrawingWindow &window) {
+	CanvasPoint mid = triangle.v0();
+	CanvasPoint split = triangle.v1();
+	CanvasPoint bot = triangle.v2();
+
+	std::vector<CanvasPoint> left = interpolate_points(bot, mid, bot.y-mid.y+1);
+	std::vector<CanvasPoint> right = interpolate_points(bot, split, bot.y-mid.y+1);
+
+	for (float i = 0.0; i < left.size(); i++) {
+		int steps = abs(left[i].x - right[i].x);	
+		std::vector<CanvasPoint> points = interpolate_points(left[i], right[i], steps+1);
+		for (int c = 0; c < points.size(); c++) {
+			int rounded_x = round(points[c].x);
+			int rounded_y = round(points[c].y);
+			if(rounded_x >= 0 && rounded_x < window.width && rounded_y >= 0 && rounded_y < window.height) {
+				if(-1/points[c].depth > depths[round(points[c].x)][round(points[c].y)]) {
+					depths[round(points[c].x)][round(points[c].y)] = -1/points[c].depth;
+					uint32_t tri_colour = (255 << 24) + (colour.red << 16) + (colour.green << 8) + colour.blue;
+					window.setPixelColour(round(points[c].x), round(points[c].y), tri_colour);
+				}
+			}
+		}
+
+	}
+}
+
+void fill_cornell(CanvasTriangle triangle, Colour colour, std::vector<std::vector<float>> &depths, DrawingWindow &window) {
+	triangle = sort_vertices(triangle);
+
+	CanvasPoint top = triangle.v0();
+	CanvasPoint mid = triangle.v1();
+	CanvasPoint bot = triangle.v2();
+
+	CanvasPoint split;
+	split.y = mid.y;
+
+	split.x = round(find_mid_x_value(mid, top, bot));
+
+	split.depth = find_mid_depth_value(mid, top, bot);
+
+	CanvasTriangle top_triangle = CanvasTriangle(top, mid, split);
+	fill_cornell_top(top_triangle, colour, depths, window);
+
+	CanvasTriangle bottom_triangle = CanvasTriangle(mid, split, bot);
+	fill_cornell_bottom(bottom_triangle, colour, depths, window);
+
+}
+
+void draw_cornell(std::vector<ModelTriangle> triangles, DrawingWindow &window) {
+	std::vector<std::vector<float>> depths(window.width, std::vector<float> (window.height, -std::numeric_limits<float>::infinity()));
+
+	for (int i = 0; i < triangles.size(); i++) {
+		CanvasTriangle triangle;
+		bool is_texture = false;
+		TextureMap texture;
+
+		if (triangles[i].colour.name != "") {
+			texture = TextureMap(triangles[i].colour.name);
+			is_texture = true;
+		}
+		for (int j = 0; j < 3; j++) {
+			glm::vec3 camera_to_vertex = glm::vec3(triangles[i].vertices[j].x - camera.x, triangles[i].vertices[j].y - camera.y, triangles[i].vertices[j].z - camera.z);
+
+			glm::vec3 adjusted_coords = camera_to_vertex * camera_orientation;
+
+			int u = -(focal_length * (adjusted_coords.x)/(adjusted_coords.z)) + (window.width / 2);
+			int v = (focal_length * (adjusted_coords.y)/(adjusted_coords.z)) + (window.height / 2);
+
+			triangle.vertices[j] = CanvasPoint(u, v, adjusted_coords.z);
+
+			//std::cout << triangle.vertices[j] << std::endl;
+
+			if (is_texture) {
+				triangle.vertices[j].texturePoint = triangles[i].texturePoints[j];
+				triangle.vertices[j].texturePoint.x *= texture.width;
+				triangle.vertices[j].texturePoint.y *= texture.height;
+
+			}	
+		}
+
+		if (is_texture) map_texture(triangle, texture, depths, window);
+		else fill_cornell(triangle, triangles[i].colour, depths, window);
+
+		
+		
+ 	}
+}
+
+void reset_cam() {
+	camera = glm::vec3(0.0, 0.0, 4.0);
+	camera_orientation = glm::mat3(glm::vec3(1.0, 0.0, 0.0),
+								   glm::vec3(0.0, 1.0, 0.0),
+								   glm::vec3(0.0, 0.0, 1.0));
+}
+
+void look_at() {
+	glm::vec3 forward = glm::normalize(camera - glm::vec3(0.0, 0.0, 0.0));
+	glm::vec3 right = glm::normalize(glm::cross(glm::vec3(0.0, 1.0, 0.0), forward));
+	glm::vec3 up = glm::normalize(glm::cross(forward, right));
+	camera_orientation = glm::mat3(right,
+								   up,
+								   forward);
+}
+
+std::vector<ModelTriangle> read_obj(std::string file_name, float scale, std::unordered_map<std::string, Colour> colours) {
+	std::ifstream obj_file;
+	std::string line;
+	std::vector<glm::vec3> vertices;
+	std::vector<TexturePoint> texture_vertices;
+	std::vector<ModelTriangle> output;
+	std::string colour;
+
+	obj_file.open(file_name);
+
+	if(!obj_file) std::cout << "unable to read obj file" << std::endl;
+	else std::cout << "obj file read successfully" << std::endl;
+
+	while(std::getline(obj_file, line)) {
+		if(line == "") continue;
+
+		std::vector<std::string> token = split(line, ' ');
+
+		if(token[0] == "v") {
+			glm::vec3 vertex = glm::vec3(stof(token[1]) * scale, stof(token[2]) * scale, stof(token[3]) * scale);
+			vertices.push_back(vertex);
+		} 
+		else if(token[0] == "vt") {
+			texture_vertices.push_back(TexturePoint(stof(token[1]), stof(token[2])));
+		}
+		else if(token[0] == "f") {
+			std::string face1 = token[1];
+			std::string face2 = token[2];
+			std::string face3 = token[3];
+
+			std::vector<std::string> new_token = split(token[1], '/');
+			std::vector<std::string> new_token_2 = split(token[2], '/');
+			std::vector<std::string> new_token_3 = split(token[3], '/');
+
+			if(new_token[1] == "") {
+				ModelTriangle triangle(vertices[stoi(face1) - 1], vertices[stoi(face2) - 1], vertices[stoi(face3) - 1], colours[colour]);
+				output.push_back(triangle);
+			}
+			else {
+				ModelTriangle triangle(vertices[stoi(face1) - 1], vertices[stoi(face2) - 1], vertices[stoi(face3) - 1], colours[colour]);
+				triangle.texturePoints[0] = texture_vertices[stof(new_token[1]) - 1];
+				triangle.texturePoints[1] = texture_vertices[stof(new_token_2[1]) - 1];
+				triangle.texturePoints[2] = texture_vertices[stof(new_token_3[1]) - 1];
+				output.push_back(triangle);
+			}
+		}
+		else if(token[0] == "usemtl") {
+			colour = token[1];
+		}
+	}
+
+	obj_file.close();
+
+	return output;
+}
+
+std::unordered_map<std::string, Colour> read_mtl(std::string file_name) {
+	std::ifstream mtl_file;
+	std::string line;
+	std::string colour_name;
+	std::unordered_map<std::string, Colour> output;
+
+	mtl_file.open(file_name);
+
+	if(!mtl_file) std::cout << "unable to read mtl file" << std::endl;
+	else std::cout << "mtl file read successfully" << std::endl;
+
+	while(std::getline(mtl_file, line)) {
+		if(line == "") continue;
+
+		std::vector<std::string> token = split(line, ' ');
+
+		if(token[0] == "newmtl") {
+			colour_name = token[1];
+		} 
+		else if(token[0] == "Kd") {
+			std::string r = token[1];
+			std::string g = token[2];
+			std::string b = token[3];
+
+			Colour colour = Colour((stof(r) * 255), int(stof(g) * 255), int(stof(b) * 255));
+			output.insert({colour_name, colour});
+		}
+		else if(token[0] == "map_Kd") {
+			Colour colour = output[colour_name];
+			colour.name = token[1];
+			output[colour_name] = colour;
+		}
+	}
+
+	mtl_file.close();
+
+	return output;
+}
+
+void draw(DrawingWindow &window) {
+	window.clearPixels();
+	for (size_t y = 0; y < window.height; y++) {
+		for (size_t x = 0; x < window.width; x++) {
+			float red = rand() % 256;
+			float green = 0.0;
+			float blue = 0.0;
+			uint32_t colour = (255 << 24) + (int(red) << 16) + (int(green) << 8) + int(blue);
+		}
+	}
+
+}
+
+void update(DrawingWindow &window) {
+	float theta = PI / 180;
+	glm::mat3 rotation_matrix = glm::mat3(
+				cos(theta), 0, -sin(theta),
+				0, 1, 0,
+				sin(theta), 0, cos(theta)
+			);
+	camera = camera * rotation_matrix;
+	look_at();
+}
+
+void handleEvent(SDL_Event event, DrawingWindow &window) {
+	if (event.type == SDL_KEYDOWN) {
+		//move camera left
+		if (event.key.keysym.sym == SDLK_LEFT) camera.x -= 0.1;
+		//move camera right
+		else if (event.key.keysym.sym == SDLK_RIGHT) camera.x += 0.1;
+		//move camera up
+		else if (event.key.keysym.sym == SDLK_UP) camera.y += 0.1;
+		//move camera down
+		else if (event.key.keysym.sym == SDLK_DOWN) camera.y -= 0.1;
+		//move camera forwards
+		else if (event.key.keysym.sym == SDLK_w) camera.z -= 0.1;
+		//move camera backwards
+		else if (event.key.keysym.sym == SDLK_s) camera.z += 0.1;
+		//rotate camera about x axis
+		else if (event.key.keysym.sym == SDLK_a) {
+			float theta = PI / 180;
+			glm::mat3 rotation_matrix = glm::mat3(
+				1, 0, 0,
+				0, cos(theta), -sin(theta),
+				0, sin(theta), cos(theta)
+			);
+			camera = camera * rotation_matrix;
+		}
+		//rotate camera about x axis
+		else if (event.key.keysym.sym == SDLK_d) {
+			float theta = - PI / 180;
+			glm::mat3 rotation_matrix = glm::mat3(
+				1, 0, 0,
+				0, cos(theta), -sin(theta),
+				0, sin(theta), cos(theta)
+			);
+			camera = camera * rotation_matrix;
+		}
+		//rotate camera about y axis
+		else if (event.key.keysym.sym == SDLK_q) {
+			float theta = PI / 180;
+			glm::mat3 rotation_matrix = glm::mat3(
+				cos(theta), 0, -sin(theta),
+				0, 1, 0,
+				sin(theta), 0, cos(theta)
+			);
+			camera = camera * rotation_matrix;
+		}
+		//rotate camera about y axis
+		else if (event.key.keysym.sym == SDLK_e) {
+			float theta = - PI / 180;
+			glm::mat3 rotation_matrix = glm::mat3(
+				cos(theta), 0, -sin(theta),
+				0, 1, 0,
+				sin(theta), 0, cos(theta)
+			);
+			camera = camera * rotation_matrix;
+		}
+		//tilt camera up
+		else if (event.key.keysym.sym == SDLK_u) {
+			float theta = PI / 180;
+			glm::mat3 rotation_matrix(
+				glm::vec3(1, 0, 0),
+				glm::vec3(0, cos(theta), -sin(theta)),
+				glm::vec3(0, sin(theta), cos(theta))
+								
+			);
+			camera_orientation *= rotation_matrix;
+		}
+		//tilt camera down
+		else if (event.key.keysym.sym == SDLK_j) {
+			float theta = - PI / 180;
+			glm::mat3 rotation_matrix(
+				glm::vec3(1, 0, 0),
+				glm::vec3(0, cos(theta), -sin(theta)),
+				glm::vec3(0, sin(theta), cos(theta))
+								
+			);
+			camera_orientation *= rotation_matrix;
+		}
+		//pan camera left
+		else if (event.key.keysym.sym == SDLK_h) {
+			float theta = PI / 180;
+			glm::mat3 rotation_matrix(
+				glm::vec3(cos(theta), 0, -sin(theta)),
+				glm::vec3(0, 1, 0),
+				glm::vec3(sin(theta), 0, cos(theta))
+								
+			);
+			camera_orientation *= rotation_matrix;
+		}
+		//pan camera right
+		else if (event.key.keysym.sym == SDLK_k) {
+			float theta = - PI / 180;
+			glm::mat3 rotation_matrix(
+				glm::vec3(cos(theta), 0, -sin(theta)),
+				glm::vec3(0, 1, 0),
+				glm::vec3(sin(theta), 0, cos(theta))
+								
+			);
+			camera_orientation *= rotation_matrix;
+		}
+		//reset camera
+		else if (event.key.keysym.sym == SDLK_r) reset_cam();
+    }
+	else if (event.type == SDL_MOUSEBUTTONDOWN) window.savePPM("output.ppm");
+}
+
+int main(int argc, char *argv[]) {
+	DrawingWindow window = DrawingWindow(WIDTH, HEIGHT, false);
+	SDL_Event event;
+
+	std::unordered_map<std::string, Colour> colours;
+	std::vector<ModelTriangle> triangles;
+	colours = read_mtl("cornell-box.mtl");
+	triangles = read_obj("cornell-box.obj", 0.4, colours);
+
+	while (true) {
+		// We MUST poll for events - otherwise the window will freeze !
+		if (window.pollForInputEvents(event)) handleEvent(event, window);
+		//if update is commented out, orbit and look at, will not run.
+		//update(window);
+		draw(window);
+		draw_cornell(triangles, window);
+		// Need to render the frame at the end, or nothing actually gets shown on the screen !
+		window.renderFrame();
+	}
+}
